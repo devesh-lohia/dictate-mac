@@ -19,6 +19,12 @@ final class DictationController {
     private var epoch = 0            // bumps every time the buffer is discarded (voice commands)
     private var previewInFlight = false
 
+    /// "done" / "clear" only act after a quiet pause, so they are not triggered by the word inside a sentence.
+    private static let doneWords = ["done"]
+    private static let clearWords = ["clear"]
+    private static let pauseSeconds: TimeInterval = 2.5
+    private var pending: (kind: String, text: String, since: Date)?
+
     // MARK: - Start up
 
     func loadModels() async throws {
@@ -44,7 +50,7 @@ final class DictationController {
         catch { Log.write("audio start failed: \(error)"); return }
 
         Log.write("start")
-        session += 1; epoch += 1
+        session += 1; epoch += 1; pending = nil
         isListening = true
         playSound("Tink")
         overlay.show()
@@ -90,10 +96,10 @@ final class DictationController {
                 case .reject(let reason): Log.write("ignored (\(reason)): \(transcript.text)")
                 }
             }
-            if VoiceCommands.trailingMatch(in: text, phrases: Pref.clearPhraseList) != nil {
+            if VoiceCommands.trailingMatch(in: text, phrases: Pref.clearPhraseList + Self.clearWords) != nil {
                 text = ""                                                   // "scratch that" then stop = discard
-            } else if let body = VoiceCommands.trailingMatch(in: text, phrases: Pref.typePhraseList) {
-                text = body                                                 // "type that" then stop = insert
+            } else if let body = VoiceCommands.trailingMatch(in: text, phrases: Pref.typePhraseList + Self.doneWords) {
+                text = body                                                 // "type that" / "done" then stop = insert
             } else if VoiceCommands.trailingMatch(in: text, phrases: Pref.stopPhraseList) != nil {
                 text = ""                                                   // "close listener": discard everything
             }
@@ -141,18 +147,48 @@ final class DictationController {
             stop(insert: false)                     // stop listening, type nothing
         } else if let body = VoiceCommands.trailingMatch(in: text, phrases: Pref.typePhraseList) {
             Log.write("command: type that -> \(body)")
-            discardBuffer()
-            guard !body.isEmpty else { overlay.flash("Nothing to type"); return }
-            overlay.setText(body)
-            overlay.setWorking("Cleaning up")
-            Task {
-                let final = Pref.cleanupEnabled ? await cleaner.clean(body) : body
-                inserter.insert(final + " ")
-                overlay.flash("Typed")
-                Log.write("typed: \(final)")
+            typeAndKeepListening(body)
+        } else if let body = VoiceCommands.trailingMatch(in: text, phrases: Self.doneWords) {
+            overlay.setText(text)
+            if pauseElapsed(kind: "done", text: text) {
+                Log.write("command: done (after pause) -> \(body)")
+                typeAndKeepListening(body)
+            }
+        } else if VoiceCommands.trailingMatch(in: text, phrases: Self.clearWords) != nil {
+            overlay.setText(text)
+            if pauseElapsed(kind: "clear", text: text) {
+                Log.write("command: clear (after pause)")
+                discardBuffer()
+                overlay.flash("Cleared")
             }
         } else {
+            pending = nil
             overlay.setText(text)
+        }
+    }
+
+    /// True once the same trailing command text has stayed unchanged for `pauseSeconds`.
+    private func pauseElapsed(kind: String, text: String) -> Bool {
+        if let p = pending, p.kind == kind, p.text == text {
+            if Date().timeIntervalSince(p.since) >= Self.pauseSeconds { pending = nil; return true }
+            return false
+        }
+        pending = (kind, text, Date())
+        return false
+    }
+
+    /// Cleans and types `body`, empties the buffer, and leaves the live window open.
+    private func typeAndKeepListening(_ body: String) {
+        pending = nil
+        discardBuffer()
+        guard !body.isEmpty else { overlay.flash("Nothing to type"); return }
+        overlay.setText(body)
+        overlay.setWorking("Cleaning up")
+        Task {
+            let final = Pref.cleanupEnabled ? await cleaner.clean(body) : body
+            inserter.insert(final + " ")
+            overlay.flash("Typed")
+            Log.write("typed: \(final)")
         }
     }
 

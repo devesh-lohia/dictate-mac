@@ -17,7 +17,9 @@ final class OverlayController {
         hosting.sizingOptions = []
         panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 480, height: 90),
                         styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
-        panel.level = .popUpMenu
+        panel.level = .screenSaver              // above full-screen apps such as a full-screen Terminal
+        panel.isFloatingPanel = true
+        panel.hidesOnDeactivate = false         // an accessory app is never "active"; do not auto-hide
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = true
